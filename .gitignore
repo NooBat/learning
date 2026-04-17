@@ -1,0 +1,46 @@
+# Binaries
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build outputs
+/project/bin/
+/project/tmp/
+*.test
+*.out
+
+# Env / secrets
+.env
+.env.*
+.envrc
+*.env
+!.env.example
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS / OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Claude Code local (machine-specific) settings
+.claude/settings.local.json
+
+# Node modules (in case a frontend shows up later)
+node_modules/
+
+# Coverage
+coverage.out
+coverage.html
+
+# Docker volumes (when we get there)
+/project/postgres-data/
