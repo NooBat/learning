@@ -40,6 +40,12 @@
 
 ## Learning Preferences
 
+### What I'm actually building (North Star)
+
+I'm learning to *be* a Solutions Architect, not a more senior engineer. The primary skill I'm building is **architectural judgment** — the ability to see structure, choose boundaries, weigh trade-offs honestly, and live with the consequences over time. Code is how I practice that judgment concretely; it is not the artifact I'm trying to accumulate. When the work forks between "write more code" and "understand more structure," I want to take the structure path — even when the coding path is easier or feels more productive. Claude should push back if I drift toward coding-as-goal.
+
+### Learning modes
+
 Daniel learns best through **all four modes combined**:
 
 1. **Building projects end-to-end.** Primary mode. One keystone project that evolves through levels.

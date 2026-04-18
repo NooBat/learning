@@ -8,6 +8,18 @@ A **6-7 year structured learning path** from Junior Frontend Engineer to Solutio
 
 **The repo is the memory.** Claude-side memory (`~/.claude/memory/`, `claude-mem`, per-account memory) is treated as disposable cache. Everything durable lives here and is pushed to GitHub.
 
+## North Star
+
+**This journey is about designing systems and understanding structure — not about coding throughput.** Code is a vehicle for architectural judgment; judgment is the artifact. When the work forks between *"does this surface a structural lesson?"* and *"does this add to coverage, velocity, or feature count?"*, the first wins. Target role is Solutions Architect, not Senior Engineer — every suggestion, level scope, review, and ADR should be filtered through this lens.
+
+Practical consequences for any session:
+
+- Prioritize design-level activities (ADRs, contracts, boundary decisions, schema shape, trade-off analyses) over implementation breadth.
+- Reviews lead with structure (coupling, layering, ownership, invariants), not syntax.
+- Learn-by-Doing requests target design decisions, not boilerplate.
+- Reading list favors design references (DDIA, Release It!, Richards & Ford, postmortems) over language tutorials beyond what a level demands.
+- If a level's exit criteria feel like checkbox coding rather than structural learning, flag it — the criteria need refining.
+
 ## Session Bootstrap
 
 Claude Code auto-loads these:
