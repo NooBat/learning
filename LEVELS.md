@@ -4,7 +4,7 @@ Status: `[ ]` open · `[~]` in-progress · `[x]` done
 
 ## Tier 1 — Backend Engineer
 
-- [ ] **L01 — mvs** — Minimum viable service: Go HTTP + Postgres CRUD for workflows
+- [~] **L01 — mvs** — Minimum viable service: Go HTTP + Postgres CRUD for workflows
 - [ ] **L02 — auth-tenancy** — Identity & multi-tenancy, first integration tests
 - [ ] **L03 — production-local** — Docker Compose, migrations, structured logs, graceful shutdown
 - [ ] **L04 — first-deployment** — Ship to Fly.io / Railway with CI

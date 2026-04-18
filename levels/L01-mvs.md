@@ -1,8 +1,8 @@
 # L01 — Minimum Viable Service
 
-**Status:** not started
+**Status:** in progress
 **Tier:** 1 — Backend Engineer
-**Started:** —
+**Started:** 2026-04-18
 **Completed:** —
 
 ## Goal
