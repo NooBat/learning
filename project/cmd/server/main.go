@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/NooBat/learning/project/internal/workflows"
 )
 
 // main is a shim. All real work lives in run so it can return errors
@@ -25,56 +28,59 @@ func main() {
 	}
 }
 
+// run is the server's real entry point. It owns the process lifecycle:
+// open the DB pool, verify reachability, wire Storage + Handler into a
+// mux, start the HTTP server, and shut everything down cleanly when the
+// signal-driven ctx is cancelled.
 func run(ctx context.Context) error {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
 		return errors.New("DATABASE_URL is required")
 	}
 
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return err
+		return fmt.Errorf("open db pool: %w", err)
 	}
 	defer pool.Close()
 
-	// Fail fast if the DB isn't reachable at startup. Better to crash
-	// here than to serve requests that all fail with 500.
-	if err := pool.Ping(ctx); err != nil {
-		return err
+	// Bound the reachability check so a hung DB doesn't wedge startup.
+	pingCtx, cancelPing := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelPing()
+	if err := pool.Ping(pingCtx); err != nil {
+		return fmt.Errorf("ping db: %w", err)
 	}
+
+	store := workflows.NewStorage(pool)
+	handler := workflows.NewHandler(store)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+	// /healthz is app-level, not domain-level — registered here, outside
+	// the workflows handler, to preserve layering.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	// TODO: register /workflows routes once internal/workflows exports a handler.
+	handler.Register(mux)
 
-	server := &http.Server{
-		Addr:              ":8080",
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
 	}
 
-	serverErr := make(chan error, 1)
+	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s", server.Addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-		close(serverErr)
+		errCh <- srv.ListenAndServe()
 	}()
 
-	// Block until either a signal cancels ctx or the server errors.
 	select {
 	case <-ctx.Done():
-		log.Println("shutdown signal received")
-	case err := <-serverErr:
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelShutdown()
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case err := <-errCh:
 		return err
 	}
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	return server.Shutdown(shutdownCtx)
 }
