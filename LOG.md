@@ -103,3 +103,29 @@ This is a concrete worked example of `.claude/rules/collaboration.md` operating 
 **Next:**
 - `/start-level 02 auth-tenancy` — write the L02 brief.
 - L02 openers bundle the L01 carry-overs: PUT/DELETE, 22P02 error translation, first Go test suite using the `fakeStore` affordance, `project/docs/architecture.md` stub. L02's core goal (auth + tenancy) stacks on top of these.
+
+## [2026-04-20] [LEVEL-TRANSITION] L01 → L02
+
+- **Completed:** L01 — Go HTTP + Postgres CRUD workflows service shipped at commits `6e75813` (code) and `624150c` (bookkeeping). Exit criteria met for Create / Read-one / Read-list; PUT/DELETE, malformed-UUID translation, architecture.md stub, and the first test suite all deferred to L02 as warm-ups.
+- **Started:** L02 (auth-tenancy) — layer identity and multi-tenancy onto the workflows service, and plant the first Go test suite using the consumer-defined `storage` interface as the seed affordance. Brief scaffolded at `levels/L02-auth-tenancy.md`; ready for Daniel's review + exit-criteria refinement before any code moves.
+- **Why L02 now:** all L01 exit criteria either shipped or were explicitly re-homed to L02 with architectural rationale (see L01 "What actually shipped" recap). No open blockers; working tree clean post-`624150c`.
+- **Key artifacts from L01:**
+  - `adrs/0001-router-choice.md` — accepted: `net/http` stdlib (Go 1.22+ method patterns close the historical ergonomic gap that motivated chi/gin; reversibility cheap via `http.Handler`).
+  - `adrs/0002-postgres-driver.md` — accepted: `pgx` native v5 + `pgxpool` (JSONB fidelity for `workflows.steps`; forward compatibility with Postgres-specific features at L05/L06; driver lock-in explicitly accepted).
+  - Six architectural patterns in the codebase: (1) boundary translation (`pgx.ErrNoRows` → `ErrNotFound`), (2) consumer-defined unexported `storage` interface in `handler.go`, (3) validation-at-the-edge with in-place mutation, (4) buffer-first JSON encode, (5) Go 1.22+ method-prefixed ServeMux with `{id}` brace syntax, (6) lifecycle orchestration rooted at `context.Background()` for shutdown (not the already-cancelled parent).
+- **Carry-over from L01 (bundled as L02 warm-up tasks, in order):**
+  1. ADR `malformed-uuid-translation` — choose 404 (reuse `ErrNotFound`) or 400 (introduce `ErrInvalidID`) for Postgres `SQLSTATE 22P02`. Recommended bias: 404, because tenancy's presence-disclosure posture arriving this same level wants cross-tenant reads to return 404 too. Picking 404 here lets one posture rule the whole service.
+  2. Implement `PUT /workflows/{id}` + `DELETE /workflows/{id}`. Mechanical extension — but a good place to notice `PUT`'s error ladder is `Create` + a 404 branch from `GetByID` (compositional pattern).
+  3. Translate `22P02` at the storage boundary per the ADR.
+  4. First Go test suite: `httptest.NewServer` + `fakeStore` satisfying the unexported `storage` interface; cover every 400/404/500 branch at the handler level. Add one real-DB integration test for the golden path.
+  5. Write `project/docs/architecture.md` documenting the L01 baseline before L02 extends it.
+- **L02 ADRs queued:** `malformed-uuid-translation` (warm-up #1), `auth-model`, `tenancy-isolation`, `test-strategy`. The first three are architecturally load-bearing; the fourth sets the testing pyramid shape every later level inherits.
+- **Opening decision biases (to be challenged via ADR — not accepted as default):**
+  - **Auth model:** opaque bearer token with a server-side `tokens` table, over JWT / session / OIDC. Simpler primitives, explicit revocation, defers the JWT footgun landscape (algorithm confusion, clock skew, key rotation) to a later level when service-to-service need actually motivates it.
+  - **Tenancy isolation:** application-level filtering (`WHERE tenant_id = $1` threaded through every query) over Postgres RLS / schema-per-tenant. Cheap to start, explicit in code, trivially testable; RLS documented as the future migration path if defense-in-depth concerns emerge.
+  - **Presence disclosure:** cross-tenant reads return 404 (not 403). Consistent with the 22P02 decision above. A 403 leaks existence; a 404 doesn't.
+- **Blocked:** None.
+- **Next:**
+  - Daniel reads `levels/L02-auth-tenancy.md` and refines exit criteria.
+  - Commit the scaffold: `git add -A && git commit -m "scaffold L02: auth-tenancy"`.
+  - Invoke `/write-adr malformed-uuid-translation` before touching any code — the 404-vs-400 decision sets the presence-disclosure posture the rest of L02 inherits.
