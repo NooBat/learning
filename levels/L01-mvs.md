@@ -1,9 +1,9 @@
 # L01 — Minimum Viable Service
 
-**Status:** in progress
+**Status:** complete (with documented deferrals — see "What actually shipped")
 **Tier:** 1 — Backend Engineer
 **Started:** 2026-04-18
-**Completed:** —
+**Completed:** 2026-04-20
 
 ## Goal
 
@@ -27,18 +27,18 @@ Future levels layer on top (auth, tests, Docker, async work). Focus here on maki
 
 All checkable. All must be true before claiming L01 done.
 
-- [ ] Go module initialized in `project/` (`go mod init github.com/<user>/learning/project` or similar)
-- [ ] `workflows` table exists in `flux_dev` database (schema: id uuid, name text, trigger_type text, steps jsonb, timestamps)
-- [ ] HTTP server runs via `go run ./cmd/server` and listens on `:8080`
-- [ ] `POST /workflows` accepts JSON, validates minimally, creates a row, returns 201 + created resource
-- [ ] `GET /workflows` returns JSON array of all workflows (200)
-- [ ] `GET /workflows/{id}` returns a single workflow (200) or 404
-- [ ] `PUT /workflows/{id}` updates a workflow (200) or 404
-- [ ] `DELETE /workflows/{id}` deletes a workflow (204) or 404
-- [ ] Database connection string read from `DATABASE_URL` environment variable (not hardcoded)
-- [ ] Manual end-to-end test with `curl` documented in `notes/l01-curl-tests.md` (covers all 5 endpoints)
-- [ ] At least one ADR written — the router-choice ADR is almost certain (see below)
-- [ ] Architecture doc stub created at `project/docs/architecture.md` describing the L01 shape
+- [x] Go module initialized in `project/` (`go mod init github.com/NooBat/learning/project`)
+- [x] `workflows` table exists in `flux_dev` database (schema: id uuid, name text, trigger_type text CHECK-constrained, steps jsonb, timestamps)
+- [x] HTTP server runs via `go run ./cmd/server` and listens on `:8080`
+- [x] `POST /workflows` accepts JSON, validates at the handler edge, creates a row, returns 201 + created resource (hydrated with server-assigned `id` / `created_at` / `updated_at` via `INSERT ... RETURNING`)
+- [x] `GET /workflows` returns JSON array of all workflows (200), newest-first by `created_at`
+- [x] `GET /workflows/{id}` returns a single workflow (200) or 404
+- [ ] ~~`PUT /workflows/{id}` updates a workflow (200) or 404~~ — **deferred to L02** (see "What actually shipped" below)
+- [ ] ~~`DELETE /workflows/{id}` deletes a workflow (204) or 404~~ — **deferred to L02**
+- [x] Database connection string read from `DATABASE_URL` environment variable (not hardcoded)
+- [ ] ~~Manual end-to-end test with `curl` documented in `notes/l01-curl-tests.md`~~ — **deferred** (B-choice at closeout: a checked-in smoke script was deemed lower value than the `fakeStore` test-suite investment planned at L02 opener; smoke test was still run interactively at closeout)
+- [x] Two ADRs written — `0001-router-choice` (→ `net/http` stdlib) and `0002-postgres-driver` (→ `pgx` native)
+- [ ] ~~Architecture doc stub created at `project/docs/architecture.md`~~ — **deferred to L02** (the layering the doc would describe — consumer-defined `storage` interface, handler↔storage boundary translation, validation-at-the-edge posture — is captured in the 2026-04-20 LOG entry; a doc stub at `project/docs/architecture.md` will land alongside the L02 opening changes)
 
 ## Scope
 
@@ -105,3 +105,28 @@ Run this checklist:
 5. Invoke `/start-level 02 auth-tenancy` to scaffold the next level.
 
 If any criterion isn't met, don't transition. Finish it.
+
+## What actually shipped (close recap — 2026-04-20)
+
+L01 closed with **CRUD-minus-U-D**: Create, Read-one, Read-list — plus all supporting architecture. The mutation pair (PUT/DELETE) was scope-narrowed mid-session because the remaining architectural lessons L01 was structured to teach were all covered:
+
+- **Boundary translation** (pgx driver errors ↔ domain sentinels) — exercised by `GetByID` (`pgx.ErrNoRows` → `ErrNotFound`) and `Create` (catch-all path).
+- **Consumer-defined interfaces** — `handler.go`'s unexported `storage` interface, not a producer-exported `IStorage` on `storage.go`. Pays off as a test affordance at L02.
+- **Validation at the edge** — `validate(*Workflow)` mutates-in-place (TrimSpace) and wraps `ErrInvalidInput`; DB CHECK constraint is the invariant source of truth.
+- **Buffer-first JSON encode posture** — materialize full response before any byte is written, so mid-encode failures still return 500 instead of a corrupted 200. Trade memory for recoverability.
+- **Method-prefixed routing** (Go 1.22+ stdlib `ServeMux`) — `POST /workflows`, `GET /workflows/{id}`, `GET /workflows`; auto-405 on wrong method.
+- **Lifecycle orchestration** — signal-driven ctx via `signal.NotifyContext`, buffered-size-1 error channel, goroutine-wrapped `ListenAndServe`, select on `ctx.Done() vs errCh`, shutdown context rooted at `context.Background()` (not the already-cancelled parent).
+
+PUT/DELETE would be straightforward extensions of the patterns already in place — no new architectural lessons, ~30 additional lines across storage + handler + one more interface method + one route. Moved to L02 as a warm-up.
+
+### Deferred to L02 (tracked in `STATUS.md` and the 2026-04-20 LOG entry)
+
+1. Implement `PUT` and `DELETE` for workflows. Extend the consumer-defined `storage` interface, add two storage methods, two handler methods, two route registrations.
+2. Translate Postgres `SQLSTATE 22P02` (malformed UUID) at the storage boundary. Today it surfaces as a 500. Map to `ErrNotFound` (404 posture) or a new `ErrInvalidID` sentinel (400 posture) — the architectural call is which client contract is cleaner.
+3. Write the first Go test suite using `httptest.NewServer` + a `fakeStore` satisfying the consumer-defined `storage` interface. The interface is already the right shape; the fake is ~20 lines and covers every 400/404/500 branch.
+4. Write `project/docs/architecture.md` stub describing the layering.
+5. Optional: checked-in smoke script (`scripts/smoke.sh`) once the test suite lands — lower priority than Go tests but cheap.
+
+### Known architectural gap
+
+`GET /workflows/<malformed-uuid>` returns 500. Root cause: Postgres raises `SQLSTATE 22P02 (invalid_text_representation)` when `$1` isn't a valid UUID; this error falls through the handler's error ladder to the catch-all 500 branch. Clean fix lives at the storage boundary (see deferred item 2). L02 will close this.

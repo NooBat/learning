@@ -8,8 +8,13 @@
 # Go build outputs
 /project/bin/
 /project/tmp/
+/project/server
+/project/cmd/server/server
 *.test
 *.out
+
+# Serena semantic index (machine-local cache)
+.serena/
 
 # Env / secrets
 .env
