@@ -1,9 +1,7 @@
 package workflows
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/NooBat/learning/project/internal/httpx"
 )
 
 // Handler is the HTTP adapter for the workflows domain. It owns JSON
@@ -44,38 +44,31 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var workflow Workflow
-	if err := json.NewDecoder(r.Body).Decode(&workflow); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		log.Printf("workflows: json decoding error: %v", err)
+	if err := httpx.DecodeJSON(r, &workflow); err != nil {
+		log.Printf("workflows: unable to decode: %v", err)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
 	if err := validate(&workflow); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	err := h.store.Create(r.Context(), &workflow)
 	if errors.Is(err, ErrInvalidInput) {
-		http.Error(w, "invalid workflow input", http.StatusBadRequest)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid workflow input")
 		return
 	}
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
 		log.Printf("workflows: unable to create: %v", err)
 		return
 	}
 
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(workflow); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	if err := httpx.WriteJSON(w, http.StatusCreated, workflow); err != nil {
 		log.Printf("workflows: json encoding error: %v", err)
-		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	w.Write(buf.Bytes())
 }
 
 func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
@@ -83,45 +76,31 @@ func (h *Handler) getByID(w http.ResponseWriter, r *http.Request) {
 
 	workflow, err := h.store.GetByID(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
-		http.Error(w, "workflow not found", http.StatusNotFound)
+		httpx.WriteError(w, http.StatusNotFound, "workflow not found")
 		return
 	}
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
 		log.Printf("workflows: unable to find %s: %v", id, err)
 		return
 	}
 
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(workflow); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	if err := httpx.WriteJSON(w, http.StatusOK, workflow); err != nil {
 		log.Printf("workflows: json encoding error: %v", err)
-		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(buf.Bytes())
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	slice, err := h.store.List(r.Context())
 	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
 		log.Printf("workflows: unable to list: %v", err)
 		return
 	}
 
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(slice); err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+	if err := httpx.WriteJSON(w, http.StatusOK, slice); err != nil {
 		log.Printf("workflows: json encoding error: %v", err)
-		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(buf.Bytes())
 }
 
 // validate enforces domain invariants on an inbound Workflow before it
@@ -151,7 +130,3 @@ func validate(w *Workflow) error {
 func wrapInvalid(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrInvalidInput, fmt.Sprintf(format, args...))
 }
-
-// Ensure the imports stay referenced while bodies are TODO stubs.
-var _ = errors.Is
-var _ = json.NewDecoder
