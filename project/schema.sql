@@ -21,5 +21,6 @@ CREATE TABLE IF NOT EXISTS workflows (
     trigger_type  text        NOT NULL CHECK (trigger_type IN ('schedule', 'webhook', 'manual')),
     steps         jsonb       NOT NULL DEFAULT '[]'::jsonb,
     created_at    timestamptz NOT NULL DEFAULT now(),
-    updated_at    timestamptz NOT NULL DEFAULT now()
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    deleted_at    timestamptz
 );

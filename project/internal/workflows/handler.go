@@ -33,6 +33,8 @@ type storage interface {
 	Create(ctx context.Context, w *Workflow) error
 	GetByID(ctx context.Context, id string) (*Workflow, error)
 	List(ctx context.Context) ([]*Workflow, error)
+	Update(ctx context.Context, id string, w *Workflow) error
+	Delete(ctx context.Context, id string) error
 }
 
 // NewHandler wires a Handler to anything that satisfies storage.
@@ -45,6 +47,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /workflows", h.create)
 	mux.HandleFunc("GET /workflows/{id}", h.getByID)
 	mux.HandleFunc("GET /workflows", h.list)
+	mux.HandleFunc("PUT /workflows/{id}", h.update)
+	mux.HandleFunc("DELETE /workflows/{id}", h.delete)
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +120,64 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if err := httpx.WriteJSON(w, http.StatusOK, slice); err != nil {
 		log.Printf("workflows: json encoding error: %v", err)
 	}
+}
+
+func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	const maxBodySize = 1 * MiB
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+
+	var workflow Workflow
+
+	err := httpx.DecodeJSON(r, &workflow)
+	if mbe, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		log.Printf("workflows: body exceeded limit %d bytes", mbe.Limit)
+		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	if err != nil {
+		log.Printf("workflows: unable to decode: %v", err)
+		httpx.WriteError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	if err := validate(&workflow); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	err = h.store.Update(r.Context(), id, &workflow)
+	if errors.Is(err, ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "workflow not found")
+		return
+	}
+	if errors.Is(err, ErrInvalidInput) {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid workflow input")
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		log.Printf("workflows: unable to update: %v", err)
+		return
+	}
+
+	if err := httpx.WriteJSON(w, http.StatusOK, workflow); err != nil {
+		log.Printf("workflows: json encoding error: %v", err)
+	}
+}
+
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	err := h.store.Delete(r.Context(), id)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		log.Printf("workflow: unable to delete: %v", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // validate enforces domain invariants on an inbound Workflow before it
