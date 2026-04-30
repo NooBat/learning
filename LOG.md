@@ -129,3 +129,60 @@ This is a concrete worked example of `.claude/rules/collaboration.md` operating 
   - Daniel reads `levels/L02-auth-tenancy.md` and refines exit criteria.
   - Commit the scaffold: `git add -A && git commit -m "scaffold L02: auth-tenancy"`.
   - Invoke `/write-adr malformed-uuid-translation` before touching any code — the 404-vs-400 decision sets the presence-disclosure posture the rest of L02 inherits.
+
+## [2026-04-21] [ADR-ACCEPTED] 0003 — Malformed UUID translation → 404
+
+- **Did:** Closed warm-up #1 ADR. Decision: Postgres `SQLSTATE 22P02` translates to `ErrNotFound` at the storage boundary (option A — reuse existing sentinel, no new `ErrInvalidID`). One presence-disclosure posture for the whole service: malformed, missing, and (later) cross-tenant UUIDs all return byte-identical 404 bodies.
+- **Decided:** Translation lives in storage's `GetByID` via `*pgconn.PgError` `errors.As` + `Code == "22P02"` check. Server-side `log.Printf` retains the raw SQLSTATE for debuggability — opacity-on-wire, transparency-in-log. Handler error ladder unchanged (still keys on `errors.Is(err, ErrNotFound)`).
+- **Why option A over `ErrInvalidID`:** the malformed UUID is a transport-parsing failure, not a domain concept. Inventing a domain sentinel for it would couple the domain to URL-encoding choices. Tenancy isolation (later this level) needs the same 404 anyway — picking 404 here lets one rule cover both layers.
+- **Blocked:** None.
+- **Next:** Begin ADR 0004 (HTTP response utilities) — extracting the buffer-encode + `http.Error` patterns duplicated across handlers, ahead of L03 `runs` adding a second consumer.
+
+## [2026-04-23] [ADR-PROPOSED] 0004 — HTTP response utilities
+
+- **Did:** Drafted ADR 0004 covering three options (private same-package helpers / shared `internal/httpx` package / responder framework) + two sub-decisions (envelope shape, status ownership). Ran caveman-compression pass on the prose to keep it scannable.
+- **Decided:** Status `Proposed`. No implementation yet — the boundary choice is the architectural pivot, and the envelope decision is sticky once external clients exist (Shape 2 → Shape 3 = breaking for clients reading `error` as a string). Both worth pinning before code.
+- **Blocked:** Decision pending Daniel's review.
+- **Next:** Daniel reviews options and locks the decision. If B chosen, scaffold `project/internal/httpx`.
+
+## [2026-04-25] [ADR-ACCEPTED] 0004 — HTTP response utilities → Option B + Shape 2 + Ownership 1
+
+- **Did:**
+  - Accepted ADR 0004 (`adrs/0004-http-response-utilities.md`). Decision: shared `internal/httpx` package (option B) + JSON-simple envelope `{"error": "<msg>"}` (Shape 2) + handler picks HTTP status (Ownership 1).
+  - Created `project/internal/httpx/httpx.go` (~50 LOC). Three exports: `WriteJSON` (buffer-first encode), `WriteError` (envelope wrapper delegating to `WriteJSON` for shape consistency), `DecodeJSON` (wraps `json.NewDecoder(r.Body).Decode(dst)` with `DisallowUnknownFields()` — Daniel's implementation per Learn-by-Doing).
+  - Refactored `internal/workflows/handler.go` to consume httpx helpers. Removed `bytes` + `encoding/json` imports; added httpx import. Buffer-encode dance × 3 collapsed; `http.Error` calls × 7 swapped to `httpx.WriteError`. Error ladder shape unchanged.
+  - Committed as `ddba176` (ADR) + `80c0b50` (httpx package + handler integration).
+- **Decided (the three architectural pivots, recap):**
+  - **Option B over A:** turns the envelope invariant from convention into compile-time property before L03 `runs` adds a second consumer. ADR 0003's byte-identical-404 guarantee becomes a build-time property.
+  - **Shape 2 over Shape 1 (text/plain) and Shape 3 (structured):** machine-parseable for log aggregators and frontend rendering, without designing `code` semantics that may never be needed. Shape 2 → 3 sticky once clients ship; cheap pre-deploy.
+  - **Ownership 1 over Ownership 2:** domain errors stay transport-agnostic. `ErrNotFound` / `ErrInvalidInput` carry zero HTTP knowledge — reusable in CLI / worker / future gRPC surfaces.
+- **Did (also):** WriteJSON encode-failure path writes the canonical Shape 2 body as a literal (`{"error":"internal server error"}`) rather than recursing through `WriteError` — avoids infinite-recursion class on a marshal failure.
+- **Blocked:** None.
+- **Next:** Validation refactor in handler — body size cap + decode error handling decisions.
+
+## [2026-04-29] handler validation refactor + opacity decisions
+
+- **Did:**
+  - `httpx.DecodeJSON` settles as `decoder.DisallowUnknownFields()` + `Decode(dst)` — extra fields rejected at the helper level, no malformed-vs-extra distinction.
+  - Handler keeps decode-error handling: opaque "invalid json" 400 to the client, raw `err` logged server-side. Same opacity-on-wire / transparency-in-log posture as ADR 0003 — generalized from storage boundary to request boundary.
+  - Added `KiB` / `MiB` package-level constants (`1 << 10`, `1 << 20`) using bit shifts.
+- **Decided:**
+  - **Opacity at the handler, not the helper.** httpx is a transport encoder, not an error policy layer — handler picks the user-facing message and the log level. Avoids a new sentinel error type that would couple httpx to caller semantics.
+  - **Body size cap location: handler-side (option B), not helper-side.** Per-endpoint flexibility (different limits per route possible later); helper stays JSON-only; future migration to middleware is mechanical when auth / upload routes need different caps.
+- **Blocked:** Variable naming for the `*http.MaxBytesError` distinguish — `isSizeExceeded` was awkward; settled on idiomatic `mbe, ok := errors.AsType[*http.MaxBytesError](err)` next session.
+- **Next:** Implement MaxBytesReader at handler edge and ship.
+
+## [2026-04-30] L02 warm-up #1 closed + option 2 framing
+
+- **Did:**
+  - `internal/workflows/handler.go` `create` now caps body at `1 * MiB` via `http.MaxBytesReader(w, r.Body, maxBodySize)`. `*http.MaxBytesError` branch returns 413 (`http.StatusRequestEntityTooLarge`) with `mbe.Limit` logged server-side. Non-size decode failures continue to 400 "invalid json".
+  - Build + vet clean. Committed as `26b302b`.
+  - Updated `STATUS.md` to reflect ADR 0003 + 0004 acceptance, httpx shipped, body cap landed; queued ADR 0005 + tests + architecture.md as remaining warm-ups.
+- **Decided:**
+  - **413 distinguish over collapsing into 400.** Two reasons: client-actionable (413 tells them to send less data; 400 doesn't), and observable (separate metric bucket for "client too noisy" vs "client malformed" once metrics arrive at L05+). Cost: one extra branch in the error ladder.
+  - **`errors.AsType` over `errors.As`.** Go 1.26 stdlib generic — no zero-value placeholder var, returns `(T, bool)` directly. Verified by build (initially assumed third-party, was wrong; lesson: verify by doing, not by memory).
+- **Blocked:** None.
+- **Next session target:**
+  - **Option 2 (PUT/DELETE) is ADR-worthy first.** Three stacked decisions: PUT semantics (strict vs upsert), DELETE existence (strict 404 vs idempotent 204), hard vs soft delete. ADR drives `storage` interface signatures.
+  - Two natural pairings: (hard, strict) for L02 simplicity, or (soft, idempotent) to extend ADR 0003 opacity to deletes + add retention/audit posture.
+  - Recommendation: single ADR `0005-workflow-lifecycle-ops.md` covering all three (decisions compose; splitting fragments the trade-off space). After ADR: extend storage interface, then handler methods + routes.
