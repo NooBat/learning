@@ -13,6 +13,11 @@ import (
 	"github.com/NooBat/learning/project/internal/httpx"
 )
 
+const (
+	KiB = 1 << 10
+	MiB = 1 << 20
+)
+
 // Handler is the HTTP adapter for the workflows domain. It owns JSON
 // encoding/decoding, HTTP status code selection, and request routing —
 // but holds no Postgres knowledge. All persistence goes through Storage.
@@ -43,8 +48,18 @@ func (h *Handler) Register(mux *http.ServeMux) {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+	const maxBodySize = 1 * MiB
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
+
 	var workflow Workflow
-	if err := httpx.DecodeJSON(r, &workflow); err != nil {
+
+	err := httpx.DecodeJSON(r, &workflow)
+	if mbe, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		log.Printf("workflows: body exceeded limit %d bytes", mbe.Limit)
+		httpx.WriteError(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	if err != nil {
 		log.Printf("workflows: unable to decode: %v", err)
 		httpx.WriteError(w, http.StatusBadRequest, "invalid json")
 		return
@@ -55,7 +70,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.store.Create(r.Context(), &workflow)
+	err = h.store.Create(r.Context(), &workflow)
 	if errors.Is(err, ErrInvalidInput) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid workflow input")
 		return
