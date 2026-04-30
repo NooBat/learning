@@ -186,3 +186,39 @@ This is a concrete worked example of `.claude/rules/collaboration.md` operating 
   - **Option 2 (PUT/DELETE) is ADR-worthy first.** Three stacked decisions: PUT semantics (strict vs upsert), DELETE existence (strict 404 vs idempotent 204), hard vs soft delete. ADR drives `storage` interface signatures.
   - Two natural pairings: (hard, strict) for L02 simplicity, or (soft, idempotent) to extend ADR 0003 opacity to deletes + add retention/audit posture.
   - Recommendation: single ADR `0005-workflow-lifecycle-ops.md` covering all three (decisions compose; splitting fragments the trade-off space). After ADR: extend storage interface, then handler methods + routes.
+
+## [2026-05-01] [ADR-ACCEPTED] 0005 — Workflow lifecycle ops → Pairing B + warm-up #2 shipped
+
+- **Did (ADR):** Drafted, accepted, and committed ADR 0005 (`adrs/0005-workflow-lifecycle-ops.md`, commit `8a13ecc`). Decision: PUT strict / DELETE idempotent 204 / soft delete via `deleted_at`. Tipping factor framed as opacity-on-wire through-line: ADRs 0003 (storage 404), 0004 (transport envelope), 0005 (lifecycle DELETE) compose into a service-wide stance — three ADRs sharing the posture turn opacity from per-decision tactic into inherited invariant.
+- **Did (implementation):**
+  - `project/schema.sql`: `deleted_at timestamptz` (nullable, no default) inlined into `CREATE TABLE workflows`. Idempotent on re-run since `CREATE TABLE IF NOT EXISTS` covers the whole shape.
+  - `project/internal/workflows/storage.go`:
+    - New `Update(ctx, id, *Workflow)` — `UPDATE ... RETURNING id, created_at, updated_at`. Mutable: `name`/`trigger_type`/`steps`. Server-managed: `id`/`created_at`/`updated_at`.
+    - New `Delete(ctx, id)` — `UPDATE workflows SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL`. Uses `Exec` (returns `CommandTag`), not `QueryRow`.
+    - `GetByID` and `List` gain `WHERE deleted_at IS NULL`.
+    - New `translatePgError(err) error` helper — maps `pgx.ErrNoRows` and `*pgconn.PgError`/22P02 to `ErrNotFound`. Single source of truth for ADR 0003's rule; called by `GetByID`/`Update`/`Delete`. Future SQLSTATE additions (23505, 23503, …) land in this one function.
+  - `project/internal/workflows/handler.go`:
+    - New `update` (PUT): reuses `MaxBytesReader` + `httpx.DecodeJSON` + `validate` from create. Error ladder: `ErrNotFound` → 404; `ErrInvalidInput` → 400; catch-all → 500. Success: 200 with hydrated body via `httpx.WriteJSON(w, http.StatusOK, workflow)`.
+    - New `delete` (DELETE): no body decode, no validation. Calls `store.Delete`; swallows `ErrNotFound` (idempotency); other errors → 500. Success: `w.WriteHeader(http.StatusNoContent)` direct (no body — RFC 9110 §15.3.5).
+    - `storage` interface extended with `Update`/`Delete`.
+    - Routes registered: `PUT /workflows/{id}`, `DELETE /workflows/{id}`.
+- **Did (review iterations — 2 rounds):**
+  - **Round 1 issues caught & fixed:** `Delete` used `QueryRow` (silent-error class — pgx defers errors to `Scan`, which never ran); handler `delete` had `_ = h.store.Delete(...)` swallowing all errors including connection-loss; `Update` only RETURNed `updated_at` (response body had empty `id`/zero `created_at`); 22P02 translation missing from `Update`/`Delete`; PUT returned 201 not 200; DELETE wrote `null` body via `httpx.WriteJSON(w, 204, nil)`; `DeletedAt` exposed in `types.Workflow` JSON (storage concept leaking to API); `ALTER TABLE` appended (non-idempotent on re-run).
+  - **Round 2:** dead `pgx.ErrNoRows` branch in `Delete` (Exec never returns it); SQL style consistency; DRY threshold — same 22P02 check in three storage methods → extracted as `translatePgError` helper with named contract (the durable artifact future-readers will cite).
+- **Did (smoke — 13 cases live against real Postgres on `:8080`):**
+  - All passed. The big architectural assertion: cases 8/9/10/11 (DELETE on existing / just-deleted / never-existed / malformed-UUID) returned **byte-identical** 204 No Content with empty body. Pairing B's opacity contract holds end-to-end at runtime.
+  - PUT 404 collapses three not-addressable paths (missing UUID / malformed UUID / soft-deleted ID) into one response: `{"error":"workflow not found"}`. Same architectural shape as DELETE 204, different status.
+  - PUT 413 fired on a 2_000_046-byte body (cap 1_048_576) — the error-class distinguish from option 1 holds in real conditions, not just unit-test theory.
+  - List excluded just-soft-deleted row but kept L01-era rows with `deleted_at IS NULL`. Soft-delete filter discriminates correctly.
+- **Decided:**
+  - **`translatePgError` extracted at three call sites, not earlier.** Two would have been YAGNI; three is the conventional DRY threshold. ADR 0005 added two methods, hit the threshold, refactor justified itself by the extraction's structural payoff (named contract, single point for future SQLSTATE additions, unit-testable in isolation once tests land).
+  - **`DeletedAt` not in `types.Workflow`.** Soft delete is a storage concept the API hides — exposing the field via JSON would contradict pairing B's opacity intent. Field stays out of the wire contract; storage internals don't need it on the struct since all reads filter `WHERE deleted_at IS NULL`.
+  - **`w.WriteHeader(http.StatusNoContent)` direct, no `httpx` helper.** RFC 9110 §15.3.5 forbids 204 bodies; growing `httpx` for one no-body case would expand scope unhelpfully. Single-call-site direct write keeps the helper JSON-only per ADR 0004's scope note.
+- **Commits:**
+  - `8a13ecc` — ADR 0005 accepted.
+  - `a175f45` — PUT/DELETE handlers + soft delete + `translatePgError`.
+- **Blocked:** None.
+- **Next session target:**
+  - **Warm-up #3: first Go test suite.** `internal/workflows/handler_test.go` using `httptest.NewServer` + `fakeStore` satisfying the unexported `storage` interface. The four DELETE paths' opacity invariant from this session's smoke is the highest-value test target — assert byte-identical responses by automated comparison.
+  - Decision en route to writing the suite: response-body assertion strategy (parse JSON via shared helper vs assert raw bytes). The choice ties into ADR 0004's noted Shape 2 → Shape 3 migration concern — a parsing helper is forward-compatible; raw-byte asserts lock tests to current shape.
+  - Possibly motivates writing the ADR for `test-strategy` first if the testing-pyramid shape needs pinning before the suite scaffolds.
