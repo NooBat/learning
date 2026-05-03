@@ -168,48 +168,41 @@ func TestGetByID_NotFound(t *testing.T) {
 	}
 }
 
-// ---- Critical opacity invariant test (ADR 0005) ----
-
-// TestDelete_OpacityInvariant pins ADR 0005's pairing-B opacity guarantee
-// into a regression test. The contract: DELETE on each of the four ID
-// classes below MUST produce byte-identical responses on the wire —
-// status, body, and (modulo Date/Content-Length) headers. A future
-// refactor that breaks this (e.g., adding a body to 204, leaking
-// existence info via different status codes, changing envelope shape on
-// one path but not another) gets caught here instead of in production.
-//
-// The four ID classes:
-//  1. existing-not-deleted row (seed via store.Create + capture id)
-//  2. just-deleted row (DELETE the same id from class 1 a second time)
-//  3. never-existed UUID (well-formed UUID never inserted)
-//  4. malformed UUID ("not-a-uuid") — at handler level via fakeStore,
-//     this hits the same "not in rows" path as case 3. The end-to-end
-//     22P02-translation behavior is covered by the integration ring.
-//
-// All four cases must produce status 204 and an empty body, and all
-// four bodies must be bytes.Equal to each other. The byte-equality
-// assertion is the strict form of "opacity-on-wire" — even if the
-// expected status/body changes in a future ADR, the four cases must
-// continue to match each other.
 func TestDelete_OpacityInvariant(t *testing.T) {
-	t.Skip("TODO(human): implement TestDelete_OpacityInvariant per the doc-comment above")
-	// TODO(human): implement.
-	//
-	// Suggested shape (you decide the structure):
-	//   1. store := newFakeStore(); seed one row via store.Create with a
-	//      Workflow{Name, TriggerType: TriggerManual, Steps: []Step{}}.
-	//      Capture the resulting w.ID — that's your "existing" id for case 1.
-	//   2. srv := newTestServer(t, store)
-	//   3. http.NewRequest("DELETE", srv.URL+"/workflows/"+id, nil)  +
-	//      http.DefaultClient.Do(req) — net/http has no DELETE convenience
-	//      helper like Get/Post.
-	//   4. For each of the four ID classes, capture (status, body) tuples.
-	//   5. Assert: every status == http.StatusNoContent (204).
-	//   6. Assert: every body has len == 0  (RFC 9110 §15.3.5 — 204 no body).
-	//   7. Assert: bytes.Equal across all four bodies (the opacity invariant).
-	//
-	// Why byte-equality and not just status checks: a regression that
-	// returns 204 for three cases and 204-with-a-body for the fourth
-	// passes a status-only check but leaks "this id exists" via body
-	// presence. byte-equality catches that.
+	store := newFakeStore()
+	w := Workflow{Name: "test workflow", TriggerType: TriggerManual, Steps: []Step{}}
+
+	err := store.Create(context.Background(), &w)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	srv := newTestServer(t, store)
+
+	cases := []struct {
+		label string
+		id    string
+	}{
+		{"existing", w.ID},
+		{"deleted", w.ID},
+		{"non-existent", newFakeUUID()},
+		{"malformed", "malformed-uuid"},
+	}
+
+	for _, tc := range cases {
+		req, err := http.NewRequest("DELETE", srv.URL+"/workflows/"+tc.id, nil)
+		if err != nil {
+			t.Fatalf("[%s] new request: %v", tc.label, err)
+		}
+
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("[%s] exec request %v", tc.label, err)
+		}
+
+		requireStatus(t, res.StatusCode, http.StatusNoContent)
+		if got := readBody(t, res); len(got) != 0 {
+			t.Fatalf("[%s] body length = %d, want = %d", tc.label, len(got), 0)
+		}
+	}
 }
