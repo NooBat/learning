@@ -128,6 +128,17 @@ func decodeWorkflow(t *testing.T, body []byte) Workflow {
 	return w
 }
 
+// decodeWorkflowList decodes a 2xx response body from GET /workflows
+// into a slice. Mirrors decodeWorkflow's shape.
+func decodeWorkflowList(t *testing.T, body []byte) []*Workflow {
+	t.Helper()
+	var list []*Workflow
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatalf("decode workflow list: %v; body=%s", err, body)
+	}
+	return list
+}
+
 func newTestServer(t *testing.T, store storage) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -470,5 +481,95 @@ func TestUpdate_ValidationFailures(t *testing.T) {
 				t.Fatalf("error = %q, want contains %q", msg, tc.contains)
 			}
 		})
+	}
+}
+
+// ---- List + GetByID success coverage ----
+
+func TestList_Empty(t *testing.T) {
+	srv := newTestServer(t, newFakeStore())
+
+	resp, err := http.Get(srv.URL + "/workflows")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusOK)
+	if got := decodeWorkflowList(t, body); len(got) != 0 {
+		t.Fatalf("len = %d, want 0", len(got))
+	}
+}
+
+// TestList_ReturnsLiveOnly exercises the soft-delete WHERE filter at
+// the list endpoint. Tombstoned rows MUST NOT leak into the list
+// response — same opacity principle as ADR 0005, applied to a read
+// site instead of a write site.
+func TestList_ReturnsLiveOnly(t *testing.T) {
+	store := newFakeStore()
+	alive := seedWorkflow(t, store, "alive")
+	tombstone := seedWorkflow(t, store, "tombstone")
+	if err := store.Delete(context.Background(), tombstone.ID); err != nil {
+		t.Fatalf("delete tombstone: %v", err)
+	}
+	srv := newTestServer(t, store)
+
+	resp, err := http.Get(srv.URL + "/workflows")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusOK)
+	got := decodeWorkflowList(t, body)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1 (tombstone excluded)", len(got))
+	}
+	if got[0].ID != alive.ID {
+		t.Fatalf("returned id = %q, want %q (alive only)", got[0].ID, alive.ID)
+	}
+}
+
+func TestGetByID_Success(t *testing.T) {
+	store := newFakeStore()
+	seed := seedWorkflow(t, store, "found")
+	srv := newTestServer(t, store)
+
+	resp, err := http.Get(srv.URL + "/workflows/" + seed.ID)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusOK)
+	w := decodeWorkflow(t, body)
+	if w.ID != seed.ID {
+		t.Fatalf("id = %q, want %q", w.ID, seed.ID)
+	}
+	if w.Name != "found" {
+		t.Fatalf("name = %q, want %q", w.Name, "found")
+	}
+}
+
+// TestGetByID_SoftDeleted is the read-site mirror of TestUpdate_NotFound's
+// soft-deleted case. Tombstoned rows must return the same 404 response
+// as never-existed rows — the opacity invariant applied to GetByID.
+func TestGetByID_SoftDeleted(t *testing.T) {
+	store := newFakeStore()
+	seed := seedWorkflow(t, store, "doomed")
+	if err := store.Delete(context.Background(), seed.ID); err != nil {
+		t.Fatalf("delete seed: %v", err)
+	}
+	srv := newTestServer(t, store)
+
+	resp, err := http.Get(srv.URL + "/workflows/" + seed.ID)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusNotFound)
+	if msg := errorMessage(t, body); msg != "workflow not found" {
+		t.Fatalf("error = %q, want %q", msg, "workflow not found")
 	}
 }
