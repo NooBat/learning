@@ -176,6 +176,18 @@ func putJSON(t *testing.T, url, body string) *http.Response {
 	return resp
 }
 
+// seedWorkflow inserts a minimal valid workflow into the fakeStore and
+// returns the populated value (with server-assigned id + timestamps).
+// Saves five lines per test that needs a pre-existing row.
+func seedWorkflow(t *testing.T, store *fakeStore, name string) *Workflow {
+	t.Helper()
+	w := &Workflow{Name: name, TriggerType: TriggerManual, Steps: []Step{}}
+	if err := store.Create(context.Background(), w); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	return w
+}
+
 // ---- Pattern reference test ----
 
 // TestGetByID_NotFound exercises the simplest 4xx path so the suite
@@ -326,5 +338,137 @@ func TestCreate_BodyTooLarge(t *testing.T) {
 	requireStatus(t, resp.StatusCode, http.StatusRequestEntityTooLarge)
 	if msg := errorMessage(t, got); msg != "request body too large" {
 		t.Fatalf("error = %q, want %q", msg, "request body too large")
+	}
+}
+
+// ---- Update branch coverage ----
+
+func TestUpdate_Success(t *testing.T) {
+	store := newFakeStore()
+	seed := seedWorkflow(t, store, "original")
+	srv := newTestServer(t, store)
+
+	body := `{"name":"renamed","trigger_type":"webhook","steps":[]}`
+	resp := putJSON(t, srv.URL+"/workflows/"+seed.ID, body)
+
+	got := readBody(t, resp)
+	requireStatus(t, resp.StatusCode, http.StatusOK)
+
+	w := decodeWorkflow(t, got)
+	if w.Name != "renamed" {
+		t.Fatalf("name = %q, want %q", w.Name, "renamed")
+	}
+	if w.TriggerType != TriggerWebhook {
+		t.Fatalf("trigger_type = %q, want %q", w.TriggerType, TriggerWebhook)
+	}
+	if w.ID != seed.ID {
+		t.Fatalf("id = %q, want %q (id is immutable)", w.ID, seed.ID)
+	}
+	if !w.CreatedAt.Equal(seed.CreatedAt) {
+		t.Fatalf("created_at = %v, want %v (created_at is immutable)", w.CreatedAt, seed.CreatedAt)
+	}
+}
+
+func TestUpdate_InvalidJSON(t *testing.T) {
+	store := newFakeStore()
+	seed := seedWorkflow(t, store, "x")
+	srv := newTestServer(t, store)
+
+	resp := putJSON(t, srv.URL+"/workflows/"+seed.ID, `{not json`)
+	body := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusBadRequest)
+	if got := errorMessage(t, body); got != "invalid json" {
+		t.Fatalf("error = %q, want %q", got, "invalid json")
+	}
+}
+
+// TestUpdate_NotFound covers two ID classes that must collapse to one
+// response per ADR 0005's opacity stance: never-existed and soft-deleted.
+// Per-ADR-0003, malformed UUID also collapses here at the integration
+// ring level — at handler-level via fakeStore, malformed hits the same
+// not-in-rows path as never-existed.
+func TestUpdate_NotFound(t *testing.T) {
+	cases := []struct {
+		label string
+		setup func(*fakeStore) string
+	}{
+		{
+			label: "never existed",
+			setup: func(_ *fakeStore) string {
+				return newFakeUUID()
+			},
+		},
+		{
+			label: "soft deleted",
+			setup: func(s *fakeStore) string {
+				w := seedWorkflow(t, s, "doomed")
+				if err := s.Delete(context.Background(), w.ID); err != nil {
+					t.Fatalf("delete seed: %v", err)
+				}
+				return w.ID
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			store := newFakeStore()
+			id := tc.setup(store)
+			srv := newTestServer(t, store)
+
+			body := `{"name":"x","trigger_type":"manual","steps":[]}`
+			resp := putJSON(t, srv.URL+"/workflows/"+id, body)
+			got := readBody(t, resp)
+
+			requireStatus(t, resp.StatusCode, http.StatusNotFound)
+			if msg := errorMessage(t, got); msg != "workflow not found" {
+				t.Fatalf("[%s] error = %q, want %q", tc.label, msg, "workflow not found")
+			}
+		})
+	}
+}
+
+func TestUpdate_BodyTooLarge(t *testing.T) {
+	store := newFakeStore()
+	seed := seedWorkflow(t, store, "x")
+	srv := newTestServer(t, store)
+
+	huge := strings.Repeat("a", 2*MiB)
+	body := `{"name":"` + huge + `","trigger_type":"manual","steps":[]}`
+
+	resp := putJSON(t, srv.URL+"/workflows/"+seed.ID, body)
+	got := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusRequestEntityTooLarge)
+	if msg := errorMessage(t, got); msg != "request body too large" {
+		t.Fatalf("error = %q, want %q", msg, "request body too large")
+	}
+}
+
+func TestUpdate_ValidationFailures(t *testing.T) {
+	cases := []struct {
+		label    string
+		body     string
+		contains string
+	}{
+		{"empty name", `{"name":"","trigger_type":"manual","steps":[]}`, "name"},
+		{"unknown trigger", `{"name":"x","trigger_type":"alien","steps":[]}`, "trigger"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			store := newFakeStore()
+			seed := seedWorkflow(t, store, "x")
+			srv := newTestServer(t, store)
+
+			resp := putJSON(t, srv.URL+"/workflows/"+seed.ID, tc.body)
+			body := readBody(t, resp)
+
+			requireStatus(t, resp.StatusCode, http.StatusBadRequest)
+			if msg := errorMessage(t, body); !strings.Contains(msg, tc.contains) {
+				t.Fatalf("error = %q, want contains %q", msg, tc.contains)
+			}
+		})
 	}
 }
