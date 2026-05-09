@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,6 +149,33 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 	return body
 }
 
+// postJSON fires a POST request with a JSON body and a Content-Type
+// header. Saves three lines per Create test.
+func postJSON(t *testing.T, url, body string) *http.Response {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	return resp
+}
+
+// putJSON fires a PUT request with a JSON body. net/http has no Put
+// convenience helper, so this wraps NewRequest + Do.
+func putJSON(t *testing.T, url, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("PUT new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT: %v", err)
+	}
+	return resp
+}
+
 // ---- Pattern reference test ----
 
 // TestGetByID_NotFound exercises the simplest 4xx path so the suite
@@ -204,5 +232,99 @@ func TestDelete_OpacityInvariant(t *testing.T) {
 		if got := readBody(t, res); len(got) != 0 {
 			t.Fatalf("[%s] body length = %d, want = %d", tc.label, len(got), 0)
 		}
+	}
+}
+
+// ---- Create branch coverage ----
+
+func TestCreate_Success(t *testing.T) {
+	srv := newTestServer(t, newFakeStore())
+
+	body := `{"name":"my workflow","trigger_type":"manual","steps":[]}`
+	resp := postJSON(t, srv.URL+"/workflows", body)
+
+	got := readBody(t, resp)
+	requireStatus(t, resp.StatusCode, http.StatusCreated)
+
+	w := decodeWorkflow(t, got)
+	if w.Name != "my workflow" {
+		t.Fatalf("name = %q, want %q", w.Name, "my workflow")
+	}
+	if w.TriggerType != TriggerManual {
+		t.Fatalf("trigger_type = %q, want %q", w.TriggerType, TriggerManual)
+	}
+	if w.ID == "" {
+		t.Fatalf("id = empty, want server-generated")
+	}
+	if w.CreatedAt.IsZero() {
+		t.Fatalf("created_at = zero, want server-stamped")
+	}
+}
+
+func TestCreate_InvalidJSON(t *testing.T) {
+	srv := newTestServer(t, newFakeStore())
+
+	resp := postJSON(t, srv.URL+"/workflows", `{not json`)
+
+	body := readBody(t, resp)
+	requireStatus(t, resp.StatusCode, http.StatusBadRequest)
+	if got := errorMessage(t, body); got != "invalid json" {
+		t.Fatalf("error = %q, want %q", got, "invalid json")
+	}
+}
+
+func TestCreate_ValidationFailures(t *testing.T) {
+	cases := []struct {
+		label    string
+		body     string
+		contains string
+	}{
+		{
+			label:    "empty name",
+			body:     `{"name":"","trigger_type":"manual","steps":[]}`,
+			contains: "name",
+		},
+		{
+			label:    "name too long",
+			body:     `{"name":"` + strings.Repeat("a", 501) + `","trigger_type":"manual","steps":[]}`,
+			contains: "500 characters",
+		},
+		{
+			label:    "unknown trigger type",
+			body:     `{"name":"x","trigger_type":"alien","steps":[]}`,
+			contains: "trigger",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			srv := newTestServer(t, newFakeStore())
+
+			resp := postJSON(t, srv.URL+"/workflows", tc.body)
+			body := readBody(t, resp)
+
+			requireStatus(t, resp.StatusCode, http.StatusBadRequest)
+			if msg := errorMessage(t, body); !strings.Contains(msg, tc.contains) {
+				t.Fatalf("error = %q, want contains %q", msg, tc.contains)
+			}
+		})
+	}
+}
+
+func TestCreate_BodyTooLarge(t *testing.T) {
+	srv := newTestServer(t, newFakeStore())
+
+	// 2 MiB > 1 MiB cap. handler.create wraps r.Body in MaxBytesReader,
+	// so DecodeJSON returns *http.MaxBytesError, which the handler maps
+	// to 413 with "request body too large" message.
+	huge := strings.Repeat("a", 2*MiB)
+	body := `{"name":"` + huge + `","trigger_type":"manual","steps":[]}`
+
+	resp := postJSON(t, srv.URL+"/workflows", body)
+	got := readBody(t, resp)
+
+	requireStatus(t, resp.StatusCode, http.StatusRequestEntityTooLarge)
+	if msg := errorMessage(t, got); msg != "request body too large" {
+		t.Fatalf("error = %q, want %q", msg, "request body too large")
 	}
 }
