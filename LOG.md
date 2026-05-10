@@ -256,3 +256,49 @@ This is a concrete worked example of `.claude/rules/collaboration.md` operating 
   - **Warm-up #3 tail: integration ring.** Provision `DATABASE_URL_TEST` (option A: separate `flux_test` DB; option B: reuse dev DB and accept TRUNCATE clobbering the 13 smoke-test rows). Implement the three integration tests already scaffolded — `TestStorage_GetByID_22P02_to_NotFound` is the architecturally distinct one (only real driver round-trip produces a real `*pgconn.PgError`; fakeStore can't simulate it).
   - Run via `go test -tags=integration ./internal/workflows/`. Default `go test ./...` continues to skip integration tests.
   - **Then warm-up #4:** `project/docs/architecture.md` stub. Document L01 baseline + L02 additions (httpx, ADR 0003 boundary translation, soft-delete pattern, test pyramid shape). The build-tag run command lands here.
+
+## [2026-05-10] Session: warm-up #3 tail (integration ring) + warm-up #4 (architecture posture-doc + ADR catalog). L02 warm-ups arc closes.
+
+- **Did (warm-up #3 tail — integration ring):**
+  - Provisioned `flux_test` DB. Option A (separate physical DB) over Option B (reuse dev DB with TRUNCATE clobber). Posture: physical isolation, mirrors CI shape, matches what L03's CI ADR will codify. The "30s unblock" of Option B trades against every future smoke-test re-seed; friction moves, doesn't disappear.
+  - Step 8 added to `infrastructure/setup-guides/02-postgres-local.md` — `CREATE DATABASE flux_test OWNER flux` + schema apply via `psql -f project/schema.sql` + `DATABASE_URL_TEST` DSN appended to `.env.local`.
+  - Implemented 3 named tests in `project/internal/workflows/storage_integration_test.go` (build tag `//go:build integration`):
+    - `TestStorage_Update_RETURNING` — id + created_at immutable across Update; updated_at server-bumped via `now()`. 2ms sleep before Update clears Postgres microsecond-resolution race risk (without it, fast hardware can produce identical timestamps for back-to-back transactions and break `.After`).
+    - `TestStorage_GetByID_22P02_to_NotFound` — ADR 0003 end-to-end against the live driver. Daniel implemented the assertion as a Learn-by-Doing. Picked contract-only via `errors.Is(err, ErrNotFound)`. Pathway-lock via `errors.As` against `*pgconn.PgError` was the second LbD option but ruled out — `translatePgError` returns `ErrNotFound` raw (no wrap chain). Daniel surfaced this himself by reading `translatePgError` before writing the assertion: *"What wrapped error, we are not wrapping anything?"* The choice itself surfaces an architectural property: opacity posture extends to the Go error chain, not just the wire.
+    - `TestStorage_Delete_SoftDeleteFilter` — soft-deleted row excluded from both `GetByID` (returns `ErrNotFound`) and `List` (filtered out). Catches a future query helper that forgets to compose the `deleted_at IS NULL` filter on one of the read sites.
+  - Build-tag discipline verified end-to-end: default `go test ./...` runs 22 handler tests + skips ring; `go test -tags=integration ./...` runs all 25.
+  - Commit `3e5d125` (integration ring + flux_test setup).
+
+- **Did (warm-up #4 — architecture doc + ADR catalog):**
+  - Drafted `project/docs/architecture.md` with 8 sections (intro, system-shape diagram, module layout, posture, invariants, test pyramid, ADR index, deferred). Daniel mid-draft: *"Why is this needed?"* Honest re-evaluation surfaced that 6 of 8 sections duplicated existing artifacts — STATUS handles tactical state, ADRs hold decisions, project tree shows layout, and an ADR catalog earns its own conventional location.
+  - Trimmed hard. Surviving doc (~33 lines) captures cross-ADR posture synthesis only:
+    - **Opacity-on-wire** (ADRs 0003 + 0004 + 0005). Single design assertion: clients learn the contract, nothing else. Includes the wrap-chain-severance note linking back to the integration test choice above.
+    - **Stdlib-purism** (ADRs 0001 + 0002 + 0006). Frameworks earn their way in via ADR; stdlib until it bites.
+  - Considered an Invariants section + 8 candidate invariants. Daniel asked *"What does this serve?"* Honest evaluation: a flat list of invariants is mostly redundant with source ADRs (each lives in source ADR's Decision section). Reframe to invariant→test map was proposed (genuinely unique value: surfaces structural-only invariants that have no automated backing) but deferred to a future `tests/coverage.md` if pressure justifies. Section dropped entirely.
+  - Created `adrs/README.md` as the catalog. Table indexes 0001-0006 with title / status / date / one-line. When-to-write-an-ADR criteria pulled from `.claude/rules/collaboration.md`. Numbering convention pinned (sequential, zero-padded, never reused; superseded ADRs add `**Status:** Superseded by NNNN`).
+  - Commit `a1cf233` (architecture posture doc + ADR catalog).
+
+- **Decided:**
+  - **Test-DB convention: separate `flux_test` (Option A).** Physical isolation, mirrors CI shape, matches what L03 will codify.
+  - **22P02 integration assertion: contract-only via `errors.Is`.** Pathway-lock via `errors.As` ruled out because `translatePgError` returns `ErrNotFound` raw. The choice itself surfaces opacity-as-design — not just the wire is opaque, the Go error chain is too.
+  - **architecture.md scope: cross-ADR posture synthesis only.** Honest pruning — 6 of 8 drafted sections dropped after recognizing they duplicated existing artifacts. Surviving section is the only artifact in the repo capturing how 0003+0004+0005 share one design assertion.
+  - **No invariants section.** A flat list duplicates source-ADR Decision sections without synthesizing. The invariant→test map reframe defers to a future `tests/coverage.md`.
+  - **ADR catalog at `adrs/README.md`.** Conventional location — readers find ADR navigation directly inside `adrs/` without crossing module boundaries.
+
+- **Architectural notes worth preserving:**
+  - **Doc-pruning discipline.** A doc that paraphrases ADRs and restates module layout becomes a liar within 2-3 PRs. Architecture docs earn their slot only by capturing what no other artifact does. Apply this filter *before* writing — but if writing-then-pruning is what surfaces the filter, that's a valid path too. The 6/8 prune ratio for this doc is itself the lesson.
+  - **Wrap-chain severance is a feature.** `translatePgError` returning `ErrNotFound` raw (vs `fmt.Errorf("...: %w", ErrNotFound)`) is the design choice that makes opacity hold across the Go error chain. Wrapping would leak the SQLSTATE to any caller doing `errors.As`. Same posture as ADR 0005's DELETE 204 — callers learn the contract, nothing else. Now explicitly named in `architecture.md`'s opacity-on-wire section.
+  - **LbD design as architectural surface.** The 22P02 LbD's two options weren't symmetric — option 2 (pathway-lock) revealed a property of the system (the severed wrap) when attempted. Daniel got there by reading; could equally have got there by writing the failing assertion. Either path surfaces the same architectural fact. LbDs that bake in this kind of asymmetric reveal are higher-yield than ones with two equally-valid answers.
+  - **Synthesis-vs-redundancy filter.** `architecture.md` survived only as the cross-ADR synthesis layer. ADRs are source-of-truth for decisions; STATUS is tactical state; project tree is layout; `adrs/README.md` is navigation. The 5th artifact (this doc) survives only by doing what those four can't do alone — name patterns that span them. Useful filter to apply when proposing future docs.
+
+- **Commits this session:**
+  - `3e5d125` L02 warm-up #3 tail: integration ring + flux_test setup.
+  - `a1cf233` L02 warm-up #4: cross-ADR posture synthesis + ADR catalog.
+  - (this commit) L02: bookkeeping — warm-up #4 closes (L02 warm-ups arc done).
+
+- **Blocked:** None.
+
+- **Next session target: L02 proper.**
+  1. **Draft `auth-model` ADR.** Mechanism choice (JWT vs session-cookie vs API-key vs basic-auth) × auth-vs-authz boundary × dependency posture (stdlib-only vs introduce a library — ADR 0001/0002/0006 baseline says frameworks earn their slot). Compatibility constraint: presence-disclosure (404 opacity, ADRs 0003/0004/0005 cluster) must hold post-auth. The 401 challenge composes with existing 404 behavior — name this tension up front in the ADR Context section.
+  2. **Then `tenancy-isolation`.** Schema column (`tenant_id` on workflows) + WHERE-clause discipline at every query site + cross-tenant access returns 404 (not 403 — opacity preserved). Decisions stack on auth ADR's tenant-id-on-context output.
+  3. **Implementation after both ADRs accepted.** Order shaped by ADRs — middleware likely first (provides tenant_id in context), then column migration + WHERE-clause sweep across storage methods. Test pyramid extends naturally per ADR 0006: fakeStore tracks tenant state; integration ring gets one tenancy-isolation test.

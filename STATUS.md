@@ -5,7 +5,7 @@
 
 ## This-week focus
 
-L02 warm-ups: warm-up #3 handler-side complete; integration ring queued.
+L02 warm-ups arc **closed**: integration ring shipped + architecture posture-doc + ADR catalog. L02 proper next — `auth-model` and `tenancy-isolation` ADRs to draft, then implementation.
 
 **Done (session arc 04-21 → 05-10):**
 
@@ -17,38 +17,42 @@ L02 warm-ups: warm-up #3 handler-side complete; integration ring queued.
 6. ✅ PUT/DELETE handlers shipped. Schema: `deleted_at timestamptz` inlined. Storage: `Update`/`Delete` + soft-delete filter on `GetByID`/`List`. `translatePgError` helper consolidates ADR 0003's 22P02 → ErrNotFound rule across all storage methods.
 7. ✅ Smoke: 13 cases verified live. Pairing B opacity contract holds — DELETE on existing/just-deleted/never-existed/malformed-UUID all return byte-identical 204. PUT 404 collapses missing/soft-deleted/malformed-UUID into one response.
 8. ✅ ADR 0006 (`test-strategy`) accepted — Path 1C + 2C + 3A: handler-level fakeStore primary + integration ring (`//go:build integration`) + envelope-decode helper centralizes ADR 0004's Shape 2 contract + minimal map-backed fakeStore (no fault injection at L02). Cashes the L01 `storage`-interface design payoff; locks ADR 0005 opacity invariant as a regression test.
-9. ✅ Test suite scaffolded — `internal/workflows/handler_test.go` (fakeStore + helpers: `errorMessage`, `requireStatus`, `decodeWorkflow`, `decodeWorkflowList`, `postJSON`, `putJSON`, `seedWorkflow`, `newTestServer`, `readBody`) + `internal/workflows/storage_integration_test.go` (build-tagged, 3 named tests still `t.Skip`).
+9. ✅ Test suite scaffolded — `internal/workflows/handler_test.go` (fakeStore + helpers: `errorMessage`, `requireStatus`, `decodeWorkflow`, `decodeWorkflowList`, `postJSON`, `putJSON`, `seedWorkflow`, `newTestServer`, `readBody`) + `internal/workflows/storage_integration_test.go` (build-tagged).
 10. ✅ `TestDelete_OpacityInvariant` shipped — promotes the four-DELETE-paths byte-identical wire assertion from one-time smoke to compile-time regression test. Encodes ADRs 0003 + 0004 + 0005 in one assertion.
 11. ✅ Handler branch coverage: 22 tests green covering 200 / 201 / 204 / 400 / 404 / 413. Create / Update / List / GetByID / Delete each with success + error paths. Soft-delete invisibility asserted at every read site (List + GetByID + Update). 500 path deferred per ADR 0006 cons-accepted (no fault injection at L02).
+12. ✅ **Integration ring shipped** (warm-up #3 tail). `flux_test` DB provisioned (Option A — separate physical DB, mirrors CI shape; setup-guide step 8 added). 3 tests in `storage_integration_test.go` (build-tag `//go:build integration`):
+    - `TestStorage_Update_RETURNING` — id + created_at immutable; updated_at server-bumped via `now()`. 2ms sleep clears Postgres microsecond-resolution race.
+    - `TestStorage_GetByID_22P02_to_NotFound` — ADR 0003 end-to-end against live driver. Contract-only via `errors.Is(err, ErrNotFound)` (the only viable assertion — `translatePgError` severs the wrap chain by design, making `errors.As` against `*pgconn.PgError` non-viable).
+    - `TestStorage_Delete_SoftDeleteFilter` — soft-deleted row excluded from both GetByID + List.
+    - Build-tag discipline verified: default `go test ./...` skips ring (22 handler tests); `-tags=integration` runs all 25.
+13. ✅ **Architecture posture-doc + ADR catalog shipped** (warm-up #4). `project/docs/architecture.md` ~33 lines: opacity-on-wire (ADRs 0003+0004+0005) + stdlib-purism (ADRs 0001+0002+0006) — the only artifact in the repo capturing how those ADR clusters share one design assertion. Trimmed hard from a 7-section draft after honest scrutiny: 6 sections duplicated STATUS / project-tree / ADRs / would-be-better-as-`adrs/README.md`. Invariants section considered + dropped (each candidate already lives in source ADR's Decision section). `adrs/README.md` created as the conventional ADR catalog location.
 
-**Queued (in order):**
+**Queued (L02 proper):**
 
-1. **Integration ring (warm-up #3 tail).** Provision `DATABASE_URL_TEST` (separate test DB or accept dev-DB clobber via TRUNCATE), then implement the three named integration tests already scaffolded in `storage_integration_test.go`: `TestStorage_Update_RETURNING`, `TestStorage_GetByID_22P02_to_NotFound` (the only end-to-end assertion for ADR 0003's translation rule against the real driver), `TestStorage_Delete_SoftDeleteFilter`. Run via `go test -tags=integration ./internal/workflows/`.
-2. **`project/docs/architecture.md` stub (warm-up #4).** Document the L01 baseline + L02 additions (httpx, ADR 0003 boundary translation, soft-delete pattern, test pyramid shape) before auth/tenancy land on top.
-
-After warm-ups: L02 proper — auth middleware + tenancy column + ADRs for auth model, tenancy isolation.
+1. **Draft `auth-model` ADR.** Authentication mechanism choice — JWT (stateless, scaling) vs session-cookie (revokable, simpler) vs API-key (machine-to-machine) vs basic-auth (dev-only). Compatibility constraint: presence-disclosure (404 opacity) must hold post-auth — the 401 challenge needs to compose with existing 404 behavior. Stdlib-purism posture in play (no auth library yet; ADRs 0001/0002/0006 baseline says frameworks earn their slot).
+2. **Draft `tenancy-isolation` ADR.** Schema column (`tenant_id` on workflows) + WHERE-clause discipline at every query site + cross-tenant access returns 404 (not 403, opacity preserved). Composes with auth ADR — auth identifies the tenant; tenancy enforces isolation.
+3. **Implementation after both ADRs accepted.** Order shaped by ADRs: middleware likely first (puts tenant_id in context), then column migration + WHERE sweep across storage methods. Test pyramid extends — fakeStore tracks tenant state; integration ring gets one tenancy-isolation test.
 
 ## Next-session target
 
-1. **Decide test-DB convention.** Option A: separate `flux_test` database via `psql -c 'CREATE DATABASE flux_test'` + new env var. Option B: reuse dev DB with `DATABASE_URL_TEST=$DATABASE_URL`, accept TRUNCATE clobbering smoke-test rows. Option A is production-CI-shaped; Option B unblocks the tests in 30 seconds.
-2. **Implement the three integration tests.** Suggested shapes already in `storage_integration_test.go` doc comments. The 22P02-translation test is the architecturally distinct one — only real driver round-trip produces a real `*pgconn.PgError` with code 22P02; fakeStore can't simulate it.
-3. **Verify the build-tag discipline holds.** Default `go test ./...` skips integration ring; `go test -tags=integration ./...` runs everything. Document the run command in warm-up #4's architecture stub.
+1. **Open `auth-model` ADR.** Forces converging: mechanism choice across ~4 candidates; auth-vs-authz boundary; dependency posture (stdlib-only vs introduce a library); deployment model (Fly.io at L04 implies HTTPS-required posture and cookie domain decisions). Decision space is large — the ADR's Options Considered section will be the load-bearing one.
+2. **Then `tenancy-isolation`.** Decisions stack: auth ADR's tenant-id-on-context output is the input to tenancy WHERE-clause discipline.
+3. **Implementation after both ADRs accepted.**
 
 ## Open blockers
 
-- None. Branch is ahead of `origin/main` by N local commits (this session added: ADR 0006 + scaffold + 4 test commits = 6 commits). Push when ready.
+- None. Branch ahead of `origin/main` by 2 commits this session: `3e5d125` (warm-up #3 tail — integration ring) + `a1cf233` (warm-up #4 — architecture posture doc + ADR catalog). Push when ready.
 
 ## In-flight ADRs
 
-- ADR 0003 ✅ accepted (`adrs/0003-malformed-uuid-translation.md`).
-- ADR 0004 ✅ accepted (`adrs/0004-http-response-utilities.md`).
-- ADR 0005 ✅ accepted (`adrs/0005-workflow-lifecycle-ops.md`).
-- ADR 0006 ✅ accepted (`adrs/0006-test-strategy.md`).
-- ADR queue: `auth-model`, `tenancy-isolation` (both for L02 proper, after warm-ups #3 tail + #4).
+- ADR 0001-0006 all ✅ accepted. Catalog at `adrs/README.md`.
+- ADR queue (L02 proper): `auth-model`, `tenancy-isolation`.
 
 ## Known gaps carried from L01
 
 - ~~**Malformed UUID → 500.**~~ ✅ Fixed by ADR 0003 implementation.
 - ~~**`PUT /workflows/{id}` and `DELETE /workflows/{id}` not implemented.**~~ ✅ Shipped via ADR 0005.
-- ~~**No automated tests yet.**~~ ✅ Handler-level suite lives at `internal/workflows/handler_test.go` (22 tests, 200/201/204/400/404/413 covered). Integration ring scaffolded but not implemented.
-- **`project/docs/architecture.md` does not exist.** Queued as warm-up #4.
+- ~~**No automated tests yet.**~~ ✅ Handler suite (22 tests) + integration ring (3 tests) green; runs gated by build tag.
+- ~~**`project/docs/architecture.md` does not exist.**~~ ✅ Shipped (warm-up #4) — posture-only synthesis.
+
+(No remaining gaps from L01.)
