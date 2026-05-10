@@ -14,8 +14,10 @@ package workflows
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -56,17 +58,44 @@ func truncateWorkflows(t *testing.T, pool *pgxpool.Pool) {
 // updated_at would silently leak empty id and zero created_at into the
 // response.
 func TestStorage_Update_RETURNING(t *testing.T) {
-	t.Skip("TODO: implement after warm-up #3 handler tests land")
-	// Suggested shape:
-	//   1. pool := integrationPool(t); truncateWorkflows(t, pool)
-	//   2. store := NewStorage(pool)
-	//   3. seed := &Workflow{Name: "seed", TriggerType: TriggerManual, Steps: []Step{}}
-	//      store.Create(ctx, seed)  → captures seed.ID, seed.CreatedAt
-	//   4. update := &Workflow{Name: "renamed", TriggerType: TriggerWebhook, Steps: []Step{}}
-	//      store.Update(ctx, seed.ID, update)
-	//   5. Assert: update.ID == seed.ID  (RETURNING clause echoed it back)
-	//   6. Assert: update.CreatedAt == seed.CreatedAt  (immutable)
-	//   7. Assert: update.UpdatedAt.After(seed.UpdatedAt)  (server bumped it)
+	pool := integrationPool(t)
+	truncateWorkflows(t, pool)
+	store := NewStorage(pool)
+	ctx := context.Background()
+
+	seed := &Workflow{
+		Name:        "seed",
+		TriggerType: TriggerManual,
+		Steps:       []Step{},
+	}
+	if err := store.Create(ctx, seed); err != nil {
+		t.Fatalf("seed Create: %v", err)
+	}
+
+	// Postgres now() has microsecond resolution; without a deliberate
+	// gap, fast hardware can produce identical timestamps for the
+	// Create and Update transactions, which would defeat the .After
+	// assertion below.
+	time.Sleep(2 * time.Millisecond)
+
+	update := &Workflow{
+		Name:        "renamed",
+		TriggerType: TriggerWebhook,
+		Steps:       []Step{},
+	}
+	if err := store.Update(ctx, seed.ID, update); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	if update.ID != seed.ID {
+		t.Errorf("RETURNING id mismatch: got %q, want %q", update.ID, seed.ID)
+	}
+	if !update.CreatedAt.Equal(seed.CreatedAt) {
+		t.Errorf("CreatedAt mutated by Update: got %v, want %v", update.CreatedAt, seed.CreatedAt)
+	}
+	if !update.UpdatedAt.After(seed.UpdatedAt) {
+		t.Errorf("UpdatedAt not bumped by Update: got %v, was %v", update.UpdatedAt, seed.UpdatedAt)
+	}
 }
 
 // TestStorage_GetByID_22P02_to_NotFound exercises ADR 0003 end-to-end:
@@ -76,15 +105,15 @@ func TestStorage_Update_RETURNING(t *testing.T) {
 // 22P02. This test is the single source of truth that the translation
 // rule still holds against the live driver.
 func TestStorage_GetByID_22P02_to_NotFound(t *testing.T) {
-	t.Skip("TODO: implement after warm-up #3 handler tests land")
-	// Suggested shape:
-	//   1. pool := integrationPool(t)  (no truncate needed; read-only)
-	//   2. store := NewStorage(pool)
-	//   3. _, err := store.GetByID(ctx, "not-a-uuid")
-	//   4. Assert: errors.Is(err, ErrNotFound)
-	//   5. (Optional) verify the error wraps a *pgconn.PgError with Code 22P02
-	//      via errors.As, to lock the exact translation pathway. But the
-	//      domain-level errors.Is assertion is the load-bearing one.
+	pool := integrationPool(t)
+	store := NewStorage(pool)
+	ctx := context.Background()
+
+	_, err := store.GetByID(ctx, "not-a-uuid")
+
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Malformed ID not returning correct error, got: %v, want %v", err, ErrNotFound)
+	}
 }
 
 // TestStorage_Delete_SoftDeleteFilter verifies that soft-deleted rows
@@ -94,12 +123,36 @@ func TestStorage_GetByID_22P02_to_NotFound(t *testing.T) {
 // query helper that forgets to compose the filter) leaks soft-deleted
 // rows back to clients.
 func TestStorage_Delete_SoftDeleteFilter(t *testing.T) {
-	t.Skip("TODO: implement after warm-up #3 handler tests land")
-	// Suggested shape:
-	//   1. pool := integrationPool(t); truncateWorkflows(t, pool)
-	//   2. store := NewStorage(pool)
-	//   3. Create two workflows: alive + tombstone
-	//   4. store.Delete(ctx, tombstone.ID)
-	//   5. Assert: GetByID(tombstone.ID) returns ErrNotFound
-	//   6. Assert: List() returns exactly [alive] — tombstone excluded
+	pool := integrationPool(t)
+	truncateWorkflows(t, pool)
+	store := NewStorage(pool)
+	ctx := context.Background()
+
+	alive := &Workflow{Name: "alive", TriggerType: TriggerManual, Steps: []Step{}}
+	if err := store.Create(ctx, alive); err != nil {
+		t.Fatalf("Create alive: %v", err)
+	}
+	tombstone := &Workflow{Name: "tombstone", TriggerType: TriggerManual, Steps: []Step{}}
+	if err := store.Create(ctx, tombstone); err != nil {
+		t.Fatalf("Create tombstone: %v", err)
+	}
+
+	if err := store.Delete(ctx, tombstone.ID); err != nil {
+		t.Fatalf("Delete tombstone: %v", err)
+	}
+
+	if _, err := store.GetByID(ctx, tombstone.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetByID after Delete: got err=%v, want ErrNotFound", err)
+	}
+
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("List len: got %d, want 1 (tombstone should be filtered)", len(list))
+	}
+	if list[0].ID != alive.ID {
+		t.Errorf("List[0].ID: got %q, want %q (alive)", list[0].ID, alive.ID)
+	}
 }

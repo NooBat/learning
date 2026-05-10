@@ -103,6 +103,31 @@ psql $DATABASE_URL -c "CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";"
 
 **Step 7b (optional, deferred):** the actual `CREATE TABLE` for `workflows` is part of L01 itself — you'll write it in `project/schema.sql` when setting up the module. Don't create the table yet; that's the first L01 commit.
 
+## Step 8 (L02 warm-up #3): Create the test database
+
+ADR 0006's integration ring needs a DB it can `TRUNCATE` between tests without clobbering dev data. Posture: physical isolation, mirrors what CI will look like at L03.
+
+```bash
+# Create flux_test, owned by the same flux role
+psql postgres -c "CREATE DATABASE flux_test OWNER flux;"
+psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE flux_test TO flux;"
+
+# Apply the L01 schema (creates pgcrypto + workflows table on flux_test)
+psql postgres://flux:flux@localhost:5432/flux_test -f project/schema.sql
+
+# Verify
+psql postgres://flux:flux@localhost:5432/flux_test -c "\dt"
+# Expected: one row listing the workflows table.
+```
+
+Append the test DSN to `project/.env.local` (alongside the existing `DATABASE_URL`):
+
+```
+DATABASE_URL_TEST="postgres://flux:flux@localhost:5432/flux_test?sslmode=disable"
+```
+
+> When `project/schema.sql` evolves (new column, index, constraint), apply the same change to `flux_test`. At L02 this is hand-discipline; L03's migration tooling codifies the run-against-each convention.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
